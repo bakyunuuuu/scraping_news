@@ -1,9 +1,6 @@
 import requests
 import time
 import random
-from dotenv import load_dotenv
-import os
-import pandas as pd
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -15,18 +12,44 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# .env 파일에서 환경 변수 로드
-load_dotenv()
 
 class NewsScraper:
     def __init__(self):
         self.session = requests.Session()
         self.ua = UserAgent()
+        self.save_interval = 10  # 며칠마다 저장할지
+        self.temp_links = []  # 임시 저장용 링크 리스트
     
     def _random_delay(self):  # random delay
-        time.sleep(random.uniform(0.8, 1.5))
+        time.sleep(random.uniform(0.5, 1.0))  # 대기 시간 단축
     
-    def get_news_links(self, date):
+    def save_links_to_csv(self, links, filename='news/news_links.csv', mode='a'):  # csv 파일 저장
+        import csv
+        import os
+        
+        # 디렉토리가 없으면 생성
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        
+        # 파일이 없거나 'w' 모드일 때는 헤더 추가
+        write_header = mode == 'w' or not os.path.exists(filename)
+        
+        with open(filename, mode, newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(['date', 'url'])
+            for date, url in links:
+                writer.writerow([date, url])
+        
+        print(f"{len(links)}개의 링크가 {filename}에 저장되었습니다.")
+    
+    def add_links(self, new_links):  # 새로운 링크 추가 및 저장
+        self.temp_links.extend(new_links)
+        
+        if len(self.temp_links) >= self.save_interval:
+            self.save_links_to_csv(self.temp_links)
+            self.temp_links = []  # 임시 리스트 초기화
+
+    def get_news_links(self, date):  # 뉴스 링크 크롤링
         print(f"< 날짜: {date} 시작 >")
         options = Options()
         options.add_argument(f"user-agent={self.ua.random}")
@@ -34,6 +57,12 @@ class NewsScraper:
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_experimental_option("excludeSwitches", ["enable-automation"])  
         options.add_experimental_option('useAutomationExtension', False)
+        
+        # 헤드리스 모드 추가
+        options.add_argument('--headless')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
 
         driver = webdriver.Chrome(service=Service(
             ChromeDriverManager().install()), options=options)
@@ -47,14 +76,8 @@ class NewsScraper:
         last_height = driver.execute_script("return document.body.scrollHeight")
 
         while True:  # 더보기 버튼 찾기
-            self._random_delay()
-            # 스크롤을 부드럽게 내리기
-            driver.execute_script("""
-                window.scrollTo({
-                    top: document.body.scrollHeight,
-                    behavior: 'smooth'
-                });
-            """)
+            # 일반 스크롤 사용 (부드러운 스크롤 대신)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             self._random_delay()
             
             # 새로운 높이 계산
@@ -90,45 +113,52 @@ class NewsScraper:
         
     # [TODO] 실제 뉴스 본문, 제목 등 파싱하는 함수는 아래에 새로 만들어야 함
     def get_news(self, url):
-        # (1) Selenium이나 requests로 url 접속
-        # (2) BeautifulSoup으로 html 파싱
-        # (3) 제목, 본문 등 필요한 정보 추출
-        # (4) dict 등으로 반환
+        # 01. Selenium이나 requests로 url 접속
+        # 02. BeautifulSoup으로 html 파싱
+        # 03. 제목, 본문 등 필요한 정보 추출
+        # 04. dict 등으로 반환
         pass
 
 
 if __name__ == "__main__":
     scraper = NewsScraper()
 
-    # 테스트용 날짜 설정
-    test_date = 20240101
+    # 날짜 지정 
+    start_date = 20240101
+    end_date = 20240120
 
-    # [1] 단일 날짜 테스트
-    print(f"날짜 {test_date} 크롤링 시작")
-    links = scraper.get_news_links(test_date)
-    print(f"수집된 링크 개수: {len(links)}")
+    # 날짜 리스트 생성
+    date_list = [start_date + i for i in range(end_date - start_date + 1)]   
 
+    try:
+        # 다중 스레드로 크롤링
+        with ThreadPoolExecutor(max_workers=3) as executor:  # 동시에 3개의 날짜 처리
+            future_to_date = {executor.submit(scraper.get_news_links, date): date for date in date_list}
+            for future in as_completed(future_to_date):
+                date = future_to_date[future]
+                try:
+                    links = future.result()
+                    scraper.add_links(links)  # 중간 저장 기능 사용
+                except Exception as e:
+                    print(f"날짜 {date} 처리 중 오류 발생: {e}")
 
-    # [2] 링크를 CSV로 저장
-    import csv
-    with open('news/news_links.csv', 'w', newline='', encoding='utf-8') as f:
-        writer = csv.writer(f)
-        writer.writerow(['date', 'url'])
-        for date, url in links:
-            writer.writerow([date, url])
+        # 남은 링크 저장
+        if scraper.temp_links:
+            scraper.save_links_to_csv(scraper.temp_links)
+            
+    except KeyboardInterrupt:
+        print("\n프로그램이 중단되었습니다. 현재까지 수집된 데이터를 저장합니다...")
+        if scraper.temp_links:
+            scraper.save_links_to_csv(scraper.temp_links)
+        print("저장이 완료되었습니다. 프로그램을 종료합니다.")
+        exit(0)
 
     print("크롤링 완료")
 
-    # [6] (추후) 저장된 링크를 불러와서 get_news(url)로 본문 등 크롤링
+    # 저장된 링크를 불러와서 get_news(url)로 본문 등 크롤링
     # for date, url in all_links:
     #     news_data = scraper.get_news(url)
     #     # 결과 저장
-
-    # [피드백]
-    # - 링크만 저장하지 말고 날짜와 함께 저장하면 나중에 분석/재사용에 유리함
-    # - 본문 크롤링 함수(get_news)는 반드시 별도로 만들어두는 게 확장성에 좋음
-    # - parse_news 함수는 현재 안 쓰고 있으니, 필요 없으면 삭제해도 됨
-    # - 코드가 길어지면 함수별로 파일을 분리하는 것도 고려해볼 것
 
  
 
