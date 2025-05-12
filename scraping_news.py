@@ -5,13 +5,14 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 from fake_useragent import UserAgent
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+import re
 
 
 class NewsScraper:
@@ -27,7 +28,7 @@ class NewsScraper:
         self.long_delay_time = 180  # 긴 대기 시간(초)
     
     def _random_delay(self):  # random delay
-        time.sleep(random.uniform(1.0, 2.0))  # 대기 시간
+        time.sleep(random.uniform(1.0, 3.0))  # 대기 시간
     
     def _check_session(self):
         self.request_count += 1
@@ -70,8 +71,7 @@ class NewsScraper:
             self.save_links_to_csv(self.temp_links)
             self.temp_links = []  # 임시 리스트 초기화
 
-    def get_news_links(self, date):  # 뉴스 링크 크롤링
-        print(f"< 날짜: {date} 시작 >")
+    def set_options(self):
         options = Options()
         options.add_argument(f"user-agent={self.ua.random}")
         # 자동화 감지 방지
@@ -91,14 +91,21 @@ class NewsScraper:
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
 
+        return options
+    
+    def get_news_links(self, date):  # 뉴스 링크 크롤링
+        print(f"< 날짜: {date} 시작 >")
+
+        options = self.set_options()
+
         driver = webdriver.Chrome(service=Service(
             ChromeDriverManager().install()), options=options)
         
         try:
             URL = "https://news.naver.com/breakingnews/section/101/262?date=" + str(date)
             driver.get(URL)
-            self._check_session()  # 세션 체크
 
+            self._check_session()  # 세션 체크
             self._random_delay()
 
             wait = WebDriverWait(driver, 5)
@@ -142,19 +149,69 @@ class NewsScraper:
         finally:
             driver.quit()
             print(f"날짜: {date} 총 링크 개수: {len(news_links)}")
-        
-    # [TODO] 실제 뉴스 본문, 제목 등 파싱하는 함수는 아래에 새로 만들어야 함
-    def get_news(self, url):
-        # 01. Selenium이나 requests로 url 접속
-        # 02. BeautifulSoup으로 html 파싱
-        # 03. 제목, 본문 등 필요한 정보 추출
-        # 04. dict 등으로 반환
-        pass
 
+    def clean_content(self, content):
+        if not content:
+            return None
+        
+        # 요약문(리드문) 제거
+        for tag in content.find_all('strong', class_='media_end_summary'):
+            tag.decompose()
+        
+        for tag in content.find_all(['table', 'script', 'style', 'aside', 'footer']):
+            tag.decompose()
+
+        paragraphs = [p.get_text(strip=True) for p in content.select("span.article_p")]
+        text = '\n'.join(paragraphs)
+
+        text = re.sub(r'([가-힣])([A-Za-z])', r'\1 \2', text)
+        text = re.sub(r'([A-Za-z])([가-힣])', r'\1 \2', text)
+
+        return text.strip()
+        
+
+    def get_news(self, url):
+        options = self.set_options()
+        driver = webdriver.Chrome(service=Service(
+            ChromeDriverManager().install()), options=options)
+        
+        try:
+            driver.get(url)
+
+            self._check_session()
+            self._random_delay()
+
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+
+            # 제목 추출
+            title = soup.select_one("h2.media_end_head_headline")
+            if not title:
+                title = soup.select_one("h3.media_end_head_headline)")
+
+            # 본문 추출
+            content = soup.select_one("div#newsct_article")
+            content_clean = self.clean_content(content)
+
+            if title and content_clean:
+                return {
+                    'title': title.get_text(strip=True),
+                    'content': content_clean
+                }
+            else:
+                return None
+
+        except Exception as e:
+            print(f"오류 발생: {e}")
+            return None
+        finally:
+            driver.quit()
+            
 
 if __name__ == "__main__":
     scraper = NewsScraper()
-
+    
+    """
+    # 뉴스 링크 크롤링
     # 날짜 지정 
     start_date = datetime(2023, 1, 1)
     end_date = datetime(2023, 12, 31)
@@ -190,11 +247,13 @@ if __name__ == "__main__":
         exit(0)
 
     print("크롤링 완료")
+    """
 
-    # 저장된 링크를 불러와서 get_news(url)로 본문 등 크롤링
-    # for date, url in all_links:
-    #     news_data = scraper.get_news(url)
-    #     # 결과 저장
+    # 뉴스 본문 스크래핑
+    # [TODO] 다중 스레드로 스크래핑하는 코드 추가
+    news_data = scraper.get_news("https://n.news.naver.com/mnews/article/243/0000037332")
+    print(news_data)
+
 
  
 
