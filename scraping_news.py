@@ -11,6 +11,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 
 
 class NewsScraper:
@@ -19,11 +20,31 @@ class NewsScraper:
         self.ua = UserAgent()
         self.save_interval = 10  # 며칠마다 저장할지
         self.temp_links = []  # 임시 저장용 링크 리스트
+        self.request_count = 0  # 요청 횟수 카운터
+        self.max_requests_per_session = 30  # 세션당 최대 요청 수
+        self.session_delay = 60  # 세션 재시작 시 대기 시간(초)
+        self.long_delay_interval = 5  # 몇 번의 세션마다 긴 대기 시간을 가질지
+        self.long_delay_time = 180  # 긴 대기 시간(초)
     
     def _random_delay(self):  # random delay
-        time.sleep(random.uniform(0.5, 1.0))  # 대기 시간 단축
+        time.sleep(random.uniform(1.0, 2.0))  # 대기 시간
     
-    def save_links_to_csv(self, links, filename='news/news_links.csv', mode='a'):  # csv 파일 저장
+    def _check_session(self):
+        self.request_count += 1
+        if self.request_count >= self.max_requests_per_session:
+            # 긴 대기 시간이 필요한 경우
+            if self.request_count % (self.max_requests_per_session * self.long_delay_interval) == 0:
+                print(f"긴 휴식: {self.long_delay_time}초 대기 중...")
+                time.sleep(self.long_delay_time)
+            else:
+                print(f"짧은 휴식: {self.session_delay}초 대기 중...")
+                time.sleep(self.session_delay)
+            
+            self.session = requests.Session()  # 새로운 세션 생성
+            self.request_count = 0
+            self._random_delay()  # 추가 딜레이
+
+    def save_links_to_csv(self, links, filename='news/news_links_2023.csv', mode='a'):  # csv 파일 저장
         import csv
         import os
         
@@ -58,6 +79,12 @@ class NewsScraper:
         options.add_experimental_option("excludeSwitches", ["enable-automation"])  
         options.add_experimental_option('useAutomationExtension', False)
         
+        # 추가적인 자동화 감지 방지
+        options.add_argument('--disable-infobars')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-popup-blocking')
+        options.add_argument('--disable-notifications')
+        
         # 헤드리스 모드 추가
         options.add_argument('--headless')
         options.add_argument('--disable-gpu')
@@ -67,49 +94,54 @@ class NewsScraper:
         driver = webdriver.Chrome(service=Service(
             ChromeDriverManager().install()), options=options)
         
-        URL = "https://news.naver.com/breakingnews/section/101/262?date=" + str(date)
-        driver.get(URL)
+        try:
+            URL = "https://news.naver.com/breakingnews/section/101/262?date=" + str(date)
+            driver.get(URL)
+            self._check_session()  # 세션 체크
 
-        self._random_delay()
-
-        wait = WebDriverWait(driver, 5)
-        last_height = driver.execute_script("return document.body.scrollHeight")
-
-        while True:  # 더보기 버튼 찾기
-            # 일반 스크롤 사용 (부드러운 스크롤 대신)
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
             self._random_delay()
-            
-            # 새로운 높이 계산
-            new_height = driver.execute_script("return document.body.scrollHeight")
-            
-            # 스크롤이 실제로 내려갔는지 확인
-            if new_height == last_height:
-                try:
-                    more_btn = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "_CONTENT_LIST_LOAD_MORE_BUTTON")))
-                    if more_btn.is_displayed():
-                        more_btn.click()
-                        print("더보기 버튼 클릭")
-                        self._random_delay()
-                    else:
-                        break
-                except:
-                    print("더보기 버튼 X")
-                    break
-            
-            last_height = new_height
-        
-        soup = BeautifulSoup(driver.page_source, "html.parser")
 
-        news_links = []
-        for a in soup.select("a.sa_text_title"):
-            href = a.get("href")
-            if href:
-                news_links.append((date, href)) 
-        
-        driver.quit()
-        print(f"날짜: {date} 총 링크 개수: {len(news_links)}")
-        return news_links
+            wait = WebDriverWait(driver, 5)
+            last_height = driver.execute_script("return document.body.scrollHeight")
+
+            while True:  # 더보기 버튼 찾기
+                # 일반 스크롤 사용 (부드러운 스크롤 대신)
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                self._random_delay()
+                
+                # 새로운 높이 계산
+                new_height = driver.execute_script("return document.body.scrollHeight")
+                
+                # 스크롤이 실제로 내려갔는지 확인
+                if new_height == last_height:
+                    try:
+                        more_btn = wait.until(EC.presence_of_element_located((By.CLASS_NAME, "_CONTENT_LIST_LOAD_MORE_BUTTON")))
+                        if more_btn.is_displayed():
+                            more_btn.click()
+                            # print("더보기 버튼 클릭")
+                            self._random_delay()
+                            self._check_session()  # 세션 체크
+                        else:
+                            break
+                    except:
+                        # print("더보기 버튼 X")
+                        break
+                
+                last_height = new_height
+            
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+
+            news_links = []
+            for a in soup.select("a.sa_text_title"):
+                href = a.get("href")
+                if href:
+                    news_links.append((date, href)) 
+            
+            return news_links
+            
+        finally:
+            driver.quit()
+            print(f"날짜: {date} 총 링크 개수: {len(news_links)}")
         
     # [TODO] 실제 뉴스 본문, 제목 등 파싱하는 함수는 아래에 새로 만들어야 함
     def get_news(self, url):
@@ -124,11 +156,15 @@ if __name__ == "__main__":
     scraper = NewsScraper()
 
     # 날짜 지정 
-    start_date = 20240101
-    end_date = 20240120
+    start_date = datetime(2023, 1, 1)
+    end_date = datetime(2023, 12, 31)
 
     # 날짜 리스트 생성
-    date_list = [start_date + i for i in range(end_date - start_date + 1)]   
+    date_list = []
+    current_date = start_date
+    while current_date <= end_date:
+        date_list.append(current_date.strftime('%Y%m%d'))
+        current_date += timedelta(days=1)
 
     try:
         # 다중 스레드로 크롤링
